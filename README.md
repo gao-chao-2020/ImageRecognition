@@ -59,6 +59,7 @@ dotnet run
 ```
 
 3. 访问 Swagger UI：`http://localhost:5000/swagger`
+4. 访问 Log UI：`http://localhost:5000/logs`
 
 ## 依赖
 
