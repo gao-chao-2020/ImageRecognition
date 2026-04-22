@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>日志查看器</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Consolas', 'Monaco', monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { color: #4ec9b0; margin-bottom: 20px; }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        select, button {
+            padding: 8px 12px;
+            background: #2d2d2d;
+            border: 1px solid #3e3e3e;
+            color: #d4d4d4;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover { background: #3e3e3e; }
+        button.active { background: #007acc; border-color: #007acc; }
+        .log-content {
+            background: #1e1e1e;
+            border: 1px solid #3e3e3e;
+            border-radius: 4px;
+            padding: 15px;
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
+        }
+        .log-line {
+            padding: 1px 6px;
+            border-bottom: 1px solid #2d2d2d;
+            border-left: 3px solid transparent;
+            line-height: 1.3;
+        }
+        .log-line:hover { background: #2d2d2d; }
+        .log-line.group-a { border-left: 3px solid #4ec9b0 !important; background: rgba(78, 201, 176, 0.08); }
+        .log-line.group-b { border-left: 3px solid #c586c0 !important; background: rgba(197, 134, 192, 0.08); }
+        .log-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .timestamp { color: #569cd6; white-space: nowrap; font-size: 14px; }
+        .level-badge {
+            display: inline-block;
+            padding: 0 4px;
+            border-radius: 2px;
+            font-size: 12px;
+            font-weight: bold;
+            line-height: 1.3;
+            white-space: nowrap;
+        }
+        .log-line[data-level="INF"] .level-badge { background: #4ec9b0; color: #1e1e1e; }
+        .log-line[data-level="WRN"] .level-badge { background: #dcdcaa; color: #1e1e1e; }
+        .log-line[data-level="ERR"] .level-badge { background: #f44747; color: #ffffff; }
+        .log-line[data-level="FTL"] .level-badge { background: #f44747; color: #ffffff; }
+        .message { color: #d4d4d4; display: block; margin-top: -2px; font-size: 14px; }
+        .exception-line {
+            padding: 1px 6px 1px 20px;
+            border-bottom: 1px solid #2d2d2d;
+            background: transparent !important;
+            border-left: none !important;
+        }
+        .exception-line .exception { color: #808080; margin-left: 0; display: block; }
+        .correlation-id { color: #ce9178; cursor: pointer; text-decoration: underline; white-space: nowrap; font-size: 14px; }
+        .correlation-id:hover { color: #f44747; }
+        .no-correlation { color: #808080; white-space: nowrap; font-size: 14px; }
+        .group-a .correlation-id { color: #4ec9b0 !important; }
+        .group-b .correlation-id { color: #c586c0 !important; }
+        .correlation-filter { display: none; align-items: center; gap: 10px; margin-top: 10px; padding: 10px; background: #2d2d2d; border-radius: 4px; }
+        .correlation-filter.active { display: flex; }
+        .correlation-input {
+            padding: 6px 10px;
+            background: #1e1e1e;
+            border: 1px solid #3e3e3e;
+            color: #d4d4d4;
+            border-radius: 4px;
+            width: 200px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📋 日志查看器</h1>
+
+        <div class="controls">
+            <select id="fileSelect" onchange="loadLog()">
+                <option value="">-- 选择日志文件 --</option>
+            </select>
+            <button onclick="loadLog()">🔄 刷新</button>
+            <button id="autoRefreshBtn" onclick="toggleAutoRefresh()">⏱️ 自动刷新：关</button>
+            <button onclick="scrollToBottom()">⬇️ 滚动到底部</button>
+            <button onclick="toggleCorrelationFilter()" id="corrFilterBtn">🏷️ 按 CorrelationId 筛选</button>
+            <label class="auto-refresh">
+                <input type="checkbox" id="showOnlyErrors" onchange="loadLog()"> 只显示 Error/Fatal
+            </label>
+            <span class="refresh-info" id="refreshInfo"></span>
+        </div>
+
+        <div class="correlation-filter" id="correlationFilter">
+            <label>CorrelationId:</label>
+            <input type="text" class="correlation-input" id="correlationIdInput" placeholder="输入 CorrelationId 或使用下拉列表">
+            <select class="correlation-input" id="correlationIdSelect" onchange="selectCorrelationId()">
+                <option value="">-- 选择 CorrelationId --</option>
+            </select>
+            <button onclick="applyCorrelationFilter()">应用</button>
+            <button onclick="clearCorrelationFilter()">清除</button>
+        </div>
+
+        <div class="file-info" id="fileInfo"></div>
+        <div class="log-content" id="logContent">
+            <div class="loading">点击"刷新"按钮加载日志</div>
+        </div>
+    </div>
+
+    <script>
+        let autoRefresh = false;
+        let autoRefreshInterval = null;
+        let refreshCount = 0;
+        let currentCorrelationId = '';
+
+        // 加载日志文件列表
+        async function loadFileList() {
+            try {
+                const res = await fetch('/api/logs/list');
+                const files = await res.json();
+                const select = document.getElementById('fileSelect');
+                select.innerHTML = '<option value="">-- 选择日志文件 --</option>';
+
+                files.forEach(f => {
+                    const opt = document.createElement('option');
+                    opt.value = f;
+                    opt.textContent = f;
+                    select.appendChild(opt);
+                });
+
+                // 自动选择最新的文件
+                if (files.length > 0) {
+                    select.value = files[0];
+                    resetGroupState();
+                    loadLog();
+                }
+            } catch (e) {
+                document.getElementById('logContent').innerHTML =
+                    '<div class="loading">加载文件列表失败：' + e.message + '</div>';
+            }
+        }
+
+        // 切换 CorrelationId 筛选器显示
+        function toggleCorrelationFilter() {
+            const filter = document.getElementById('correlationFilter');
+            filter.classList.toggle('active');
+            if (filter.classList.contains('active')) {
+                extractCorrelationIds();
+            }
+        }
+
+        // 从当前日志中提取 CorrelationId 列表
+        function extractCorrelationIds() {
+            const content = document.getElementById('logContent');
+            const corrIds = new Set();
+            const matches = content.innerText.match(/\[[a-f0-9]{12}\]/g);
+
+            if (matches) {
+                matches.forEach(m => corrIds.add(m.replace(/[\[\]]/g, '')));
+            }
+
+            const select = document.getElementById('correlationIdSelect');
+            select.innerHTML = '<option value="">-- 选择 CorrelationId --</option>';
+            corrIds.forEach(id => {
+                const opt = document.createElement('option');
+                opt.value = id;
+                opt.textContent = id;
+                select.appendChild(opt);
+            });
+        }
+
+        // 选择 CorrelationId
+        function selectCorrelationId() {
+            const select = document.getElementById('correlationIdSelect');
+            document.getElementById('correlationIdInput').value = select.value;
+        }
+
+        // 应用 CorrelationId 筛选
+        function applyCorrelationFilter() {
+            const corrId = document.getElementById('correlationIdInput').value.trim();
+            currentCorrelationId = corrId;
+            loadLog();
+        }
+
+        // 清除 CorrelationId 筛选
+        function clearCorrelationFilter() {
+            document.getElementById('correlationIdInput').value = '';
+            document.getElementById('correlationIdSelect').value = '';
+            currentCorrelationId = '';
+            loadLog();
+        }
+
+        // 加载日志内容
+        async function loadLog() {
+            const file = document.getElementById('fileSelect').value;
+            const showOnlyErrors = document.getElementById('showOnlyErrors').checked;
+            const correlationId = currentCorrelationId;
+
+            if (!file) {
+                document.getElementById('logContent').innerHTML =
+                    '<div class="loading">请选择日志文件</div>';
+                return;
+            }
+
+            // 重置颜色组状态
+            resetGroupState();
+
+            document.getElementById('logContent').innerHTML =
+                '<div class="loading">加载中...</div>';
+            document.getElementById('fileInfo').textContent = '';
+
+            try {
+                const url = `/api/logs/content?file=${encodeURIComponent(file)}&errorsOnly=${showOnlyErrors}&correlationId=${encodeURIComponent(correlationId || '')}`;
+                const res = await fetch(url);
+                const data = await res.json();
+
+                document.getElementById('fileInfo').textContent =
+                    `文件：${data.file} | 行数：${data.lines.length} | 大小：${(data.size / 1024).toFixed(1)} KB${data.correlationId ? ' | 筛选：' + data.correlationId : ''}`;
+
+                if (data.lines.length === 0) {
+                    document.getElementById('logContent').innerHTML =
+                        '<div class="loading">没有符合条件的日志</div>';
+                    return;
+                }
+
+                // 重置颜色组状态
+                resetGroupState();
+
+                // 直接格式化显示（后端已分组和排序）
+                const html = data.lines.map(line => formatLogLine(line)).join('');
+                document.getElementById('logContent').innerHTML = html;
+
+                // 自动刷新计数
+                refreshCount++;
+                document.getElementById('refreshInfo').textContent =
+                    `刷新次数：${refreshCount} | 最后更新：${new Date().toLocaleTimeString()}`;
+
+            } catch (e) {
+                document.getElementById('logContent').innerHTML =
+                    '<div class="loading">加载失败：' + e.message + '</div>';
+            }
+        }
+
+        // 重置颜色组状态（在加载新日志时调用）
+        function resetGroupState() {
+            lastCorrelationId = null;
+            currentGroup = 'group-a';
+        }
+
+        // 格式化单行日志
+        let lastCorrelationId = null;
+        let currentGroup = 'group-a';
+
+        function formatLogLine(line) {
+            // 匹配日志格式：2026-04-16 09:03:39.229 +08:00 [INF] [0bf0aa8890db] 消息
+            // 或者：2026-04-16 09:06:30.676 +08:00 [INF] [] Now listening
+            const match = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \+\d{2}:\d{2}) \[(\w+)\] \[([a-f0-9]{12}|\s*)\] (.*)$/);
+
+            if (!match) {
+                // 异常堆栈等非日志行
+                return `<div class="log-line exception-line"><span class="exception">${escapeHtml(line)}</span></div>`;
+            }
+
+            const [, timestamp, level, correlationId, message] = match;
+            const hasCorrelationId = correlationId.trim().length > 0;
+
+            // 当 CorrelationId 改变时切换颜色组（空 CorrelationId 不参与切换）
+            if (hasCorrelationId && correlationId !== lastCorrelationId) {
+                currentGroup = currentGroup === 'group-a' ? 'group-b' : 'group-a';
+                lastCorrelationId = correlationId;
+            }
+
+            const corrDisplay = hasCorrelationId ? correlationId : '—';
+            const corrClass = hasCorrelationId ? 'correlation-id' : 'no-correlation';
+
+            return `<div class="log-line ${currentGroup}" data-level="${level}">
+    <div class="log-header">
+        <span class="timestamp">${escapeHtml(timestamp)}</span>
+        <span class="level-badge">${level}</span>
+        <span class="${corrClass}" ${hasCorrelationId ? 'onclick="clickCorrelationId(\'' + correlationId + '\')" title="点击筛选"' : ''}>${escapeHtml(corrDisplay)}</span>
+    </div>
+    <span class="message">${escapeHtml(message)}</span>
+</div>`;
+        }
+
+        // 将日志行分组（每条日志 + 其异常堆栈）- 不再使用，后端处理
+        function groupLogLines(lines) {
+            return [];
+        }
+
+        // 按时间倒序排序日志组 - 不再使用，后端处理
+        function sortByTimeDesc(groups) {
+            return [];
+        }
+
+        // 格式化日志组（包含异常堆栈）- 不再使用，后端处理
+        function formatLogGroup(group) {
+            return '';
+        }
+
+        // 点击 CorrelationId 进行筛选
+        function clickCorrelationId(corrId) {
+            document.getElementById('correlationIdInput').value = corrId;
+            currentCorrelationId = corrId;
+            loadLog();
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 切换自动刷新
+        function toggleAutoRefresh() {
+            autoRefresh = !autoRefresh;
+            const btn = document.getElementById('autoRefreshBtn');
+
+            if (autoRefresh) {
+                btn.textContent = '⏱️ 自动刷新：开 (3s)';
+                btn.classList.add('active');
+                autoRefreshInterval = setInterval(loadLog, 3000);
+            } else {
+                btn.textContent = '⏱️ 自动刷新：关';
+                btn.classList.remove('active');
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                }
+            }
+        }
+
+        // 滚动到底部
+        function scrollToBottom() {
+            const content = document.getElementById('logContent');
+            content.scrollTop = content.scrollHeight;
+        }
+
+        // 页面加载时获取文件列表
+        loadFileList();
+    </script>
+</body>
+</html>
